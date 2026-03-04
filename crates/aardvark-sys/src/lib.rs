@@ -1,39 +1,86 @@
-//! Stub bindings for the Total Phase Aardvark I2C/SPI/GPIO USB adapter.
+//! Bindings for the Total Phase Aardvark I2C/SPI/GPIO USB adapter.
 //!
-//! This crate exposes a safe Rust API over the Aardvark C library.
+//! Uses [`libloading`] to load `aardvark.so` at runtime — the same pattern
+//! the official Total Phase C stub (`aardvark.c`) uses internally.
 //!
-//! # Current state — Stub
+//! # Library search order
 //!
-//! The Total Phase SDK (`aardvark.h` + `aardvark.so`) is not yet committed.
-//! All [`AardvarkHandle`] methods currently return
-//! [`Err(AardvarkError::NotFound)`](AardvarkError::NotFound) at runtime.
-//! Build and link succeed without the SDK.
+//! 1. `ZEROCLAW_AARDVARK_LIB` environment variable (full path to `aardvark.so`)
+//! 2. `<workspace>/crates/aardvark-sys/vendor/aardvark.so` (development default)
+//! 3. `./aardvark.so` (next to the binary, for deployment)
 //!
-//! # Enabling real hardware
+//! If none resolve, every method returns
+//! [`Err(AardvarkError::LibraryNotFound)`](AardvarkError::LibraryNotFound).
 //!
-//! 1. Download the Total Phase Aardvark Software API from
-//!    <https://www.totalphase.com/products/aardvark-software-api/>
-//! 2. Copy the SDK files into this crate:
-//!    - `aardvark.h`  → `crates/aardvark-sys/vendor/aardvark.h`
-//!    - `aardvark.so` → `crates/aardvark-sys/vendor/aardvark.so`  (Linux / macOS)
-//!    - `aardvark.dll`→ `crates/aardvark-sys/vendor/aardvark.dll` (Windows)
-//! 3. In `Cargo.toml` add `bindgen = "0.69"` to `[build-dependencies]`
-//!    and `libc = "0.2"` to `[dependencies]`.
-//! 4. Uncomment the bindgen block in `build.rs`.
-//! 5. Replace the stub method bodies below with FFI calls via `mod bindings`.
+//! # Safety
 //!
 //! This crate is the **only** place in ZeroClaw where `unsafe` is permitted.
-//! The rest of the workspace stays `#![forbid(unsafe_code)]`.
+//! All `unsafe` is confined to `extern "C"` call sites inside this file.
+//! The public API is fully safe Rust.
 
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use libloading::{Library, Symbol};
 use thiserror::Error;
 
-// When the SDK is present and bindgen has run, un-comment:
-// mod bindings;
+// ── Constants from aardvark.h ─────────────────────────────────────────────
+
+/// Bit set on a port returned by `aa_find_devices` when that port is in use.
+const AA_PORT_NOT_FREE: u16 = 0x8000;
+/// Configure adapter for I2C + GPIO (I2C master mode, SPI disabled).
+const AA_CONFIG_GPIO_I2C: i32 = 0x02;
+/// Configure adapter for SPI + GPIO (SPI master mode, I2C disabled).
+const AA_CONFIG_SPI_GPIO: i32 = 0x01;
+/// No I2C flags (standard 7-bit addressing, normal stop condition).
+const AA_I2C_NO_FLAGS: i32 = 0x00;
+/// Enable both onboard I2C pullup resistors (hardware v2+ only).
+const AA_I2C_PULLUP_BOTH: u8 = 0x03;
+
+// ── Library loading ───────────────────────────────────────────────────────
+
+static AARDVARK_LIB: OnceLock<Option<Library>> = OnceLock::new();
+
+fn lib() -> Option<&'static Library> {
+    AARDVARK_LIB
+        .get_or_init(|| {
+            let candidates: Vec<PathBuf> = vec![
+                // 1. Explicit env-var override (full path)
+                std::env::var("ZEROCLAW_AARDVARK_LIB")
+                    .ok()
+                    .map(PathBuf::from)
+                    .unwrap_or_default(),
+                // 2. Vendor directory shipped with this crate (dev default)
+                {
+                    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                    p.push("vendor/aardvark.so");
+                    p
+                },
+                // 3. Next to the running binary (deployment)
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|e| e.parent().map(|d| d.join("aardvark.so")))
+                    .unwrap_or_default(),
+                // 4. Current working directory
+                PathBuf::from("aardvark.so"),
+            ];
+            for path in candidates {
+                if path.as_os_str().is_empty() {
+                    continue;
+                }
+                if let Ok(lib) = unsafe { Library::new(&path) } {
+                    return Some(lib);
+                }
+            }
+            None
+        })
+        .as_ref()
+}
 
 /// Errors returned by Aardvark hardware operations.
 #[derive(Debug, Error)]
 pub enum AardvarkError {
-    /// No Aardvark adapter found — adapter not plugged in or SDK absent.
+    /// No Aardvark adapter found — adapter not plugged in.
     #[error("Aardvark adapter not found — is it plugged in?")]
     NotFound,
     /// `aa_open` returned a non-positive handle.
@@ -51,127 +98,270 @@ pub enum AardvarkError {
     /// GPIO operation returned a negative status code.
     #[error("GPIO error (code {0})")]
     GpioError(i32),
+    /// `aardvark.so` could not be found or loaded.
+    #[error("aardvark.so not found — set ZEROCLAW_AARDVARK_LIB or place it next to the binary")]
+    LibraryNotFound,
 }
 
 /// Convenience `Result` alias for this crate.
 pub type Result<T> = std::result::Result<T, AardvarkError>;
+
+// ── Handle ────────────────────────────────────────────────────────────────
 
 /// Safe RAII handle over the Aardvark C library handle.
 ///
 /// Automatically closes the adapter on `Drop`.
 ///
 /// **Usage pattern:** open a fresh handle per command and let it drop at the
-/// end of each operation — the same lazy-open / eager-close strategy used by
-/// [`HardwareSerialTransport`](../zeroclaw/hardware/serial/struct.HardwareSerialTransport.html)
-/// for serial devices.
+/// end of each operation (lazy-open / eager-close).
 pub struct AardvarkHandle {
-    _port: i32,
+    handle: i32,
 }
 
 impl AardvarkHandle {
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
+    // ── Lifecycle ─────────────────────────────────────────────────────────
 
-    /// Open the first available Aardvark adapter (port 0).
-    ///
-    /// Equivalent to `aa_open(0)`.
+    /// Open the first available (free) Aardvark adapter.
     pub fn open() -> Result<Self> {
-        // Stub: SDK not linked.
-        Err(AardvarkError::NotFound)
+        let ports = Self::find_devices();
+        let port = ports.first().copied().ok_or(AardvarkError::NotFound)?;
+        Self::open_port(i32::from(port))
     }
 
     /// Open a specific Aardvark adapter by port index.
-    ///
-    /// Equivalent to `aa_open(port)`.
     pub fn open_port(port: i32) -> Result<Self> {
-        // Stub: SDK not linked.
-        let _ = port;
-        Err(AardvarkError::NotFound)
+        let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
+        let handle: i32 = unsafe {
+            let f: Symbol<unsafe extern "C" fn(i32) -> i32> =
+                lib.get(b"aa_open\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            f(port)
+        };
+        if handle <= 0 {
+            Err(AardvarkError::OpenFailed(handle))
+        } else {
+            Ok(Self { handle })
+        }
     }
 
-    /// Return the port numbers of all connected Aardvark adapters.
+    /// Return the port numbers of all **free** connected adapters.
     ///
-    /// Equivalent to `aa_find_devices(16, ports)`.
-    /// Returns an empty `Vec` when the SDK is not linked.
+    /// Ports in-use by another process are filtered out.
+    /// Returns an empty `Vec` when `aardvark.so` cannot be loaded.
     pub fn find_devices() -> Vec<u16> {
-        // Stub: no hardware available.
-        Vec::new()
+        let Some(lib) = lib() else {
+            return Vec::new();
+        };
+        let mut ports = [0u16; 16];
+        let n: i32 = unsafe {
+            let Ok(f): std::result::Result<
+                Symbol<unsafe extern "C" fn(i32, *mut u16) -> i32>,
+                _,
+            > = lib.get(b"aa_find_devices\0")
+            else {
+                return Vec::new();
+            };
+            f(16, ports.as_mut_ptr())
+        };
+        if n <= 0 {
+            return Vec::new();
+        }
+        ports[..n as usize]
+            .iter()
+            .filter(|&&p| (p & AA_PORT_NOT_FREE) == 0)
+            .copied()
+            .collect()
     }
 
-    // ── I2C ───────────────────────────────────────────────────────────────────
+    // ── I2C ───────────────────────────────────────────────────────────────
 
-    /// Enable I2C mode and set the bitrate.
-    ///
-    /// Configures the adapter for I2C-only mode, sets pullups, and applies
-    /// the requested bitrate.
-    pub fn i2c_enable(&self, _bitrate_khz: u32) -> Result<()> {
-        Err(AardvarkError::NotFound)
+    /// Enable I2C mode and set the bitrate (kHz).
+    pub fn i2c_enable(&self, bitrate_khz: u32) -> Result<()> {
+        let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
+        unsafe {
+            let configure: Symbol<unsafe extern "C" fn(i32, i32) -> i32> =
+                lib.get(b"aa_configure\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            configure(self.handle, AA_CONFIG_GPIO_I2C);
+            let pullup: Symbol<unsafe extern "C" fn(i32, u8) -> i32> =
+                lib.get(b"aa_i2c_pullup\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            pullup(self.handle, AA_I2C_PULLUP_BOTH);
+            let bitrate: Symbol<unsafe extern "C" fn(i32, i32) -> i32> =
+                lib.get(b"aa_i2c_bitrate\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            bitrate(self.handle, bitrate_khz as i32);
+        }
+        Ok(())
     }
 
     /// Write `data` bytes to the I2C device at `addr`.
-    pub fn i2c_write(&self, _addr: u8, _data: &[u8]) -> Result<()> {
-        Err(AardvarkError::NotFound)
+    pub fn i2c_write(&self, addr: u8, data: &[u8]) -> Result<()> {
+        let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
+        let ret: i32 = unsafe {
+            let f: Symbol<unsafe extern "C" fn(i32, u16, i32, u16, *const u8) -> i32> =
+                lib.get(b"aa_i2c_write\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            f(
+                self.handle,
+                u16::from(addr),
+                AA_I2C_NO_FLAGS,
+                data.len() as u16,
+                data.as_ptr(),
+            )
+        };
+        if ret < 0 {
+            Err(AardvarkError::I2cWriteFailed(ret))
+        } else {
+            Ok(())
+        }
     }
 
     /// Read `len` bytes from the I2C device at `addr`.
-    pub fn i2c_read(&self, _addr: u8, _len: usize) -> Result<Vec<u8>> {
-        Err(AardvarkError::NotFound)
+    pub fn i2c_read(&self, addr: u8, len: usize) -> Result<Vec<u8>> {
+        let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
+        let mut buf = vec![0u8; len];
+        let ret: i32 = unsafe {
+            let f: Symbol<unsafe extern "C" fn(i32, u16, i32, u16, *mut u8) -> i32> =
+                lib.get(b"aa_i2c_read\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            f(
+                self.handle,
+                u16::from(addr),
+                AA_I2C_NO_FLAGS,
+                len as u16,
+                buf.as_mut_ptr(),
+            )
+        };
+        if ret < 0 {
+            Err(AardvarkError::I2cReadFailed(ret))
+        } else {
+            Ok(buf)
+        }
     }
 
-    /// Write then read — the standard I2C register-read pattern.
-    ///
-    /// Sends `write_data` to `addr` (sets the register pointer), then reads
-    /// `read_len` bytes back from the same address.
+    /// Write then read — standard I2C register-read pattern.
     pub fn i2c_write_read(&self, addr: u8, write_data: &[u8], read_len: usize) -> Result<Vec<u8>> {
         self.i2c_write(addr, write_data)?;
         self.i2c_read(addr, read_len)
     }
 
-    /// Scan the I2C bus for responding devices.
+    /// Scan the I2C bus, returning addresses of all responding devices.
     ///
-    /// Probes addresses `0x08–0x77` with a 1-byte read.  Returns the list
-    /// of addresses that ACK.  Returns an empty `Vec` in stub mode.
+    /// Probes `0x08–0x77` with a 1-byte read; returns addresses that ACK.
     pub fn i2c_scan(&self) -> Vec<u8> {
-        // Stub: no hardware.
-        Vec::new()
+        let Some(lib) = lib() else {
+            return Vec::new();
+        };
+        let Ok(f): std::result::Result<
+            Symbol<unsafe extern "C" fn(i32, u16, i32, u16, *mut u8) -> i32>,
+            _,
+        > = (unsafe { lib.get(b"aa_i2c_read\0") })
+        else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        let mut buf = [0u8; 1];
+        for addr in 0x08u16..=0x77 {
+            let ret = unsafe { f(self.handle, addr, AA_I2C_NO_FLAGS, 1, buf.as_mut_ptr()) };
+            if ret >= 0 {
+                found.push(addr as u8);
+            }
+        }
+        found
     }
 
-    // ── SPI ───────────────────────────────────────────────────────────────────
+    // ── SPI ───────────────────────────────────────────────────────────────
 
-    /// Enable SPI mode and set the bitrate.
-    pub fn spi_enable(&self, _bitrate_khz: u32) -> Result<()> {
-        Err(AardvarkError::NotFound)
+    /// Enable SPI mode and set the bitrate (kHz).
+    pub fn spi_enable(&self, bitrate_khz: u32) -> Result<()> {
+        let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
+        unsafe {
+            let configure: Symbol<unsafe extern "C" fn(i32, i32) -> i32> =
+                lib.get(b"aa_configure\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            configure(self.handle, AA_CONFIG_SPI_GPIO);
+            // SPI mode 0: polarity=rising/falling(0), phase=sample/setup(0), MSB first(0)
+            let spi_cfg: Symbol<unsafe extern "C" fn(i32, i32, i32, i32) -> i32> =
+                lib.get(b"aa_spi_configure\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            spi_cfg(self.handle, 0, 0, 0);
+            let bitrate: Symbol<unsafe extern "C" fn(i32, i32) -> i32> =
+                lib.get(b"aa_spi_bitrate\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            bitrate(self.handle, bitrate_khz as i32);
+        }
+        Ok(())
     }
 
-    /// Perform a full-duplex SPI transfer.
+    /// Full-duplex SPI transfer.
     ///
-    /// Sends the bytes in `send` and returns the simultaneously received bytes.
-    /// The returned `Vec` has the same length as `send`.
-    pub fn spi_transfer(&self, _send: &[u8]) -> Result<Vec<u8>> {
-        Err(AardvarkError::NotFound)
+    /// Sends `send` bytes; returns the simultaneously received bytes (same length).
+    pub fn spi_transfer(&self, send: &[u8]) -> Result<Vec<u8>> {
+        let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
+        let mut recv = vec![0u8; send.len()];
+        // aa_spi_write(aardvark, out_num_bytes, data_out, in_num_bytes, data_in)
+        let ret: i32 = unsafe {
+            let f: Symbol<unsafe extern "C" fn(i32, u16, *const u8, u16, *mut u8) -> i32> =
+                lib.get(b"aa_spi_write\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            f(
+                self.handle,
+                send.len() as u16,
+                send.as_ptr(),
+                recv.len() as u16,
+                recv.as_mut_ptr(),
+            )
+        };
+        if ret < 0 {
+            Err(AardvarkError::SpiTransferFailed(ret))
+        } else {
+            Ok(recv)
+        }
     }
 
-    // ── GPIO ──────────────────────────────────────────────────────────────────
+    // ── GPIO ──────────────────────────────────────────────────────────────
 
     /// Set GPIO pin directions and output values.
     ///
-    /// `direction` is a bitmask: `1` = output, `0` = input.
-    /// `value` is a bitmask of the output states.
-    pub fn gpio_set(&self, _direction: u8, _value: u8) -> Result<()> {
-        Err(AardvarkError::NotFound)
+    /// `direction`: bitmask — `1` = output, `0` = input.
+    /// `value`: output state bitmask.
+    pub fn gpio_set(&self, direction: u8, value: u8) -> Result<()> {
+        let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
+        unsafe {
+            let dir_f: Symbol<unsafe extern "C" fn(i32, u8) -> i32> =
+                lib.get(b"aa_gpio_direction\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let d = dir_f(self.handle, direction);
+            if d < 0 {
+                return Err(AardvarkError::GpioError(d));
+            }
+            let set_f: Symbol<unsafe extern "C" fn(i32, u8) -> i32> =
+                lib.get(b"aa_gpio_set\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let r = set_f(self.handle, value);
+            if r < 0 {
+                return Err(AardvarkError::GpioError(r));
+            }
+        }
+        Ok(())
     }
 
-    /// Read the current GPIO pin states.
-    ///
-    /// Returns a bitmask of the current pin levels.
+    /// Read the current GPIO pin states as a bitmask.
     pub fn gpio_get(&self) -> Result<u8> {
-        Err(AardvarkError::NotFound)
+        let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
+        let ret: i32 = unsafe {
+            let f: Symbol<unsafe extern "C" fn(i32) -> i32> =
+                lib.get(b"aa_gpio_get\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            f(self.handle)
+        };
+        if ret < 0 {
+            Err(AardvarkError::GpioError(ret))
+        } else {
+            Ok(ret as u8)
+        }
     }
 }
 
 impl Drop for AardvarkHandle {
     fn drop(&mut self) {
-        // Stub: nothing to close.
-        // Real: unsafe { bindings::aa_close(self._port); }
+        if let Some(lib) = lib() {
+            unsafe {
+                if let Ok(f) =
+                    lib.get::<unsafe extern "C" fn(i32) -> i32>(b"aa_close\0")
+                {
+                    f(self.handle);
+                }
+            }
+        }
     }
 }
 
@@ -180,29 +370,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn find_devices_returns_empty_when_sdk_absent() {
-        assert!(AardvarkHandle::find_devices().is_empty());
+    fn find_devices_does_not_panic() {
+        // With no adapter plugged in, must return empty without panicking.
+        let _ = AardvarkHandle::find_devices();
     }
 
     #[test]
-    fn open_returns_not_found_when_sdk_absent() {
-        assert!(matches!(
-            AardvarkHandle::open(),
-            Err(AardvarkError::NotFound)
-        ));
+    fn open_returns_error_when_no_hardware() {
+        // Either LibraryNotFound, NotFound, or OpenFailed — any error is fine.
+        assert!(AardvarkHandle::open().is_err());
     }
 
     #[test]
-    fn open_port_returns_not_found_when_sdk_absent() {
-        assert!(matches!(
-            AardvarkHandle::open_port(0),
-            Err(AardvarkError::NotFound)
-        ));
+    fn open_port_returns_error_when_no_hardware() {
+        assert!(AardvarkHandle::open_port(0).is_err());
     }
 
     #[test]
     fn error_display_messages_are_human_readable() {
-        assert!(AardvarkError::NotFound.to_string().contains("not found"));
+        assert!(AardvarkError::NotFound.to_string().to_lowercase().contains("not found"));
         assert!(AardvarkError::OpenFailed(-1).to_string().contains("-1"));
         assert!(AardvarkError::I2cWriteFailed(-3)
             .to_string()
@@ -210,5 +396,8 @@ mod tests {
         assert!(AardvarkError::SpiTransferFailed(-2)
             .to_string()
             .contains("SPI"));
+        assert!(AardvarkError::LibraryNotFound
+            .to_string()
+            .contains("aardvark.so"));
     }
 }
