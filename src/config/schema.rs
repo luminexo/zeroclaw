@@ -74,6 +74,10 @@ pub struct Config {
     pub api_key: Option<String>,
     /// Base URL override for provider API (e.g. "http://10.0.0.1:11434" for remote Ollama)
     pub api_url: Option<String>,
+    /// Custom API path suffix for OpenAI-compatible / custom providers
+    /// (e.g. "/v2/generate" instead of the default "/v1/chat/completions").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_path: Option<String>,
     /// Default provider ID or alias (e.g. `"openrouter"`, `"ollama"`, `"anthropic"`). Default: `"openrouter"`.
     #[serde(alias = "model_provider")]
     pub default_provider: Option<String>,
@@ -247,6 +251,10 @@ pub struct Config {
     /// External MCP server connections (`[mcp]`).
     #[serde(default, alias = "mcpServers")]
     pub mcp: McpConfig,
+
+    /// Dynamic node discovery configuration (`[nodes]`).
+    #[serde(default)]
+    pub nodes: NodesConfig,
 }
 
 /// Named provider profile definition compatible with Codex app-server style config.
@@ -258,6 +266,10 @@ pub struct ModelProviderConfig {
     /// Optional base URL for OpenAI-compatible endpoints.
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Optional custom API path suffix (e.g. "/v2/generate" instead of the
+    /// default "/v1/chat/completions"). Only used by OpenAI-compatible / custom providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_path: Option<String>,
     /// Provider protocol variant ("responses" or "chat_completions").
     #[serde(default)]
     pub wire_api: Option<String>,
@@ -514,14 +526,67 @@ pub struct McpServerConfig {
 }
 
 /// External MCP client configuration (`[mcp]` section).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct McpConfig {
     /// Enable MCP tool loading.
     #[serde(default)]
     pub enabled: bool,
+    /// Load MCP tool schemas on-demand via `tool_search` instead of eagerly
+    /// including them in the LLM context window. When `true` (the default),
+    /// only tool names are listed in the system prompt; the LLM must call
+    /// `tool_search` to fetch full schemas before invoking a deferred tool.
+    #[serde(default = "default_deferred_loading")]
+    pub deferred_loading: bool,
     /// Configured MCP servers.
     #[serde(default, alias = "mcpServers")]
     pub servers: Vec<McpServerConfig>,
+}
+
+fn default_deferred_loading() -> bool {
+    true
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            deferred_loading: default_deferred_loading(),
+            servers: Vec::new(),
+        }
+    }
+}
+
+// ── Nodes (Dynamic Node Discovery) ───────────────────────────────
+
+/// Configuration for the dynamic node discovery system (`[nodes]`).
+///
+/// When enabled, external processes/devices can connect via WebSocket
+/// at `/ws/nodes` and advertise their capabilities at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NodesConfig {
+    /// Enable dynamic node discovery endpoint.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum number of concurrent node connections.
+    #[serde(default = "default_max_nodes")]
+    pub max_nodes: usize,
+    /// Optional bearer token for node authentication.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+fn default_max_nodes() -> usize {
+    16
+}
+
+impl Default for NodesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_nodes: default_max_nodes(),
+            auth_token: None,
+        }
+    }
 }
 
 // ── TTS (Text-to-Speech) ─────────────────────────────────────────
@@ -2254,7 +2319,7 @@ impl Default for MemoryConfig {
 /// Observability backend configuration (`[observability]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ObservabilityConfig {
-    /// "none" | "log" | "prometheus" | "otel"
+    /// "none" | "log" | "verbose" | "prometheus" | "otel"
     pub backend: String,
 
     /// OTLP endpoint (e.g. "http://localhost:4318"). Only used when backend = "otel".
@@ -3013,6 +3078,8 @@ pub struct ChannelsConfig {
     pub feishu: Option<FeishuConfig>,
     /// DingTalk channel configuration.
     pub dingtalk: Option<DingTalkConfig>,
+    /// WeCom (WeChat Enterprise) Bot Webhook channel configuration.
+    pub wecom: Option<WeComConfig>,
     /// QQ Official Bot channel configuration.
     pub qq: Option<QQConfig>,
     #[cfg(feature = "channel-nostr")]
@@ -3026,6 +3093,10 @@ pub struct ChannelsConfig {
     /// Default: 300s for on-device LLMs (Ollama) which are slower than cloud APIs.
     #[serde(default = "default_channel_message_timeout_secs")]
     pub message_timeout_secs: u64,
+    /// Whether to add acknowledgement reactions (👀 on receipt, ✅/⚠️ on
+    /// completion) to incoming channel messages. Default: `true`.
+    #[serde(default = "default_true")]
+    pub ack_reactions: bool,
 }
 
 impl ChannelsConfig {
@@ -3098,6 +3169,10 @@ impl ChannelsConfig {
                 self.dingtalk.is_some(),
             ),
             (
+                Box::new(ConfigWrapper::new(self.wecom.as_ref())),
+                self.wecom.is_some(),
+            ),
+            (
                 Box::new(ConfigWrapper::new(self.qq.as_ref())),
                 self.qq.is_some()
             ),
@@ -3148,11 +3223,13 @@ impl Default for ChannelsConfig {
             lark: None,
             feishu: None,
             dingtalk: None,
+            wecom: None,
             qq: None,
             #[cfg(feature = "channel-nostr")]
             nostr: None,
             clawdtalk: None,
             message_timeout_secs: default_channel_message_timeout_secs(),
+            ack_reactions: true,
         }
     }
 }
@@ -3959,6 +4036,25 @@ impl ChannelConfig for DingTalkConfig {
     }
 }
 
+/// WeCom (WeChat Enterprise) Bot Webhook configuration
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WeComConfig {
+    /// Webhook key from WeCom Bot configuration
+    pub webhook_key: String,
+    /// Allowed user IDs. Empty = deny all, "*" = allow all
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+}
+
+impl ChannelConfig for WeComConfig {
+    fn name() -> &'static str {
+        "WeCom"
+    }
+    fn desc() -> &'static str {
+        "WeCom Bot Webhook"
+    }
+}
+
 /// QQ Official Bot configuration (Tencent QQ Bot SDK)
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QQConfig {
@@ -4027,6 +4123,7 @@ impl Default for Config {
             config_path: zeroclaw_dir.join("config.toml"),
             api_key: None,
             api_url: None,
+            api_path: None,
             default_provider: Some("openrouter".to_string()),
             default_model: Some("anthropic/claude-sonnet-4.6".to_string()),
             model_providers: HashMap::new(),
@@ -4068,6 +4165,7 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             mcp: McpConfig::default(),
+            nodes: NodesConfig::default(),
         }
     }
 }
@@ -4744,6 +4842,13 @@ impl Config {
                     "config.channels_config.dingtalk.client_secret",
                 )?;
             }
+            if let Some(ref mut wc) = config.channels_config.wecom {
+                decrypt_secret(
+                    &store,
+                    &mut wc.webhook_key,
+                    "config.channels_config.wecom.webhook_key",
+                )?;
+            }
             if let Some(ref mut qq) = config.channels_config.qq {
                 decrypt_secret(
                     &store,
@@ -4852,6 +4957,16 @@ impl Config {
         {
             if let Some(base_url) = base_url.as_ref() {
                 self.api_url = Some(base_url.clone());
+            }
+        }
+
+        // Propagate api_path from the profile when not already set at top level.
+        if self.api_path.is_none() {
+            if let Some(ref path) = profile.api_path {
+                let trimmed = path.trim();
+                if !trimmed.is_empty() {
+                    self.api_path = Some(trimmed.to_string());
+                }
             }
         }
 
@@ -5610,6 +5725,13 @@ impl Config {
                 "config.channels_config.dingtalk.client_secret",
             )?;
         }
+        if let Some(ref mut wc) = config_to_save.channels_config.wecom {
+            encrypt_secret(
+                &store,
+                &mut wc.webhook_key,
+                "config.channels_config.wecom.webhook_key",
+            )?;
+        }
         if let Some(ref mut qq) = config_to_save.channels_config.qq {
             encrypt_secret(
                 &store,
@@ -5987,6 +6109,7 @@ default_temperature = 0.7
             config_path: PathBuf::from("/tmp/test/config.toml"),
             api_key: Some("sk-test-key".into()),
             api_url: None,
+            api_path: None,
             default_provider: Some("openrouter".into()),
             default_model: Some("gpt-4o".into()),
             model_providers: HashMap::new(),
@@ -6057,11 +6180,13 @@ default_temperature = 0.7
                 lark: None,
                 feishu: None,
                 dingtalk: None,
+                wecom: None,
                 qq: None,
                 #[cfg(feature = "channel-nostr")]
                 nostr: None,
                 clawdtalk: None,
                 message_timeout_secs: 300,
+                ack_reactions: true,
             },
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),
@@ -6085,6 +6210,7 @@ default_temperature = 0.7
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             mcp: McpConfig::default(),
+            nodes: NodesConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -6333,6 +6459,7 @@ tool_dispatcher = "xml"
             config_path: config_path.clone(),
             api_key: Some("sk-roundtrip".into()),
             api_url: None,
+            api_path: None,
             default_provider: Some("openrouter".into()),
             default_model: Some("test-model".into()),
             model_providers: HashMap::new(),
@@ -6374,6 +6501,7 @@ tool_dispatcher = "xml"
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             mcp: McpConfig::default(),
+            nodes: NodesConfig::default(),
         };
 
         config.save().await.unwrap();
@@ -6731,10 +6859,12 @@ allowed_users = ["@ops:matrix.org"]
             lark: None,
             feishu: None,
             dingtalk: None,
+            wecom: None,
             qq: None,
             nostr: None,
             clawdtalk: None,
             message_timeout_secs: 300,
+            ack_reactions: true,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
@@ -6945,10 +7075,12 @@ channel_id = "C123"
             lark: None,
             feishu: None,
             dingtalk: None,
+            wecom: None,
             qq: None,
             nostr: None,
             clawdtalk: None,
             message_timeout_secs: 300,
+            ack_reactions: true,
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
@@ -7524,6 +7656,7 @@ requires_openai_auth = true
                     azure_openai_resource: None,
                     azure_openai_deployment: None,
                     azure_openai_api_version: None,
+                    api_path: None,
                 },
             )]),
             ..Config::default()
@@ -7555,6 +7688,7 @@ requires_openai_auth = true
                     azure_openai_resource: None,
                     azure_openai_deployment: None,
                     azure_openai_api_version: None,
+                    api_path: None,
                 },
             )]),
             api_key: None,
@@ -7620,6 +7754,7 @@ requires_openai_auth = true
                     azure_openai_resource: None,
                     azure_openai_deployment: None,
                     azure_openai_api_version: None,
+                    api_path: None,
                 },
             )]),
             ..Config::default()
@@ -8792,6 +8927,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![stdio_server("fs", "/usr/bin/mcp-fs")],
+            ..Default::default()
         };
         assert!(validate_mcp_config(&cfg).is_ok());
     }
@@ -8801,6 +8937,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![http_server("svc", "http://localhost:8080/mcp")],
+            ..Default::default()
         };
         assert!(validate_mcp_config(&cfg).is_ok());
     }
@@ -8810,6 +8947,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![sse_server("svc", "https://example.com/events")],
+            ..Default::default()
         };
         assert!(validate_mcp_config(&cfg).is_ok());
     }
@@ -8819,6 +8957,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![stdio_server("", "/usr/bin/tool")],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("empty name should fail");
         assert!(
@@ -8832,6 +8971,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![stdio_server("   ", "/usr/bin/tool")],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("whitespace name should fail");
         assert!(
@@ -8848,6 +8988,7 @@ require_otp_to_resume = true
                 stdio_server("fs", "/usr/bin/mcp-a"),
                 stdio_server("fs", "/usr/bin/mcp-b"),
             ],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("duplicate name should fail");
         assert!(err.to_string().contains("duplicate name"), "got: {err}");
@@ -8860,6 +9001,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![server],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("zero timeout should fail");
         assert!(err.to_string().contains("greater than 0"), "got: {err}");
@@ -8872,6 +9014,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![server],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("oversized timeout should fail");
         assert!(err.to_string().contains("exceeds max"), "got: {err}");
@@ -8884,6 +9027,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![server],
+            ..Default::default()
         };
         assert!(validate_mcp_config(&cfg).is_ok());
     }
@@ -8893,6 +9037,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![stdio_server("fs", "")],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("empty command should fail");
         assert!(
@@ -8911,6 +9056,7 @@ require_otp_to_resume = true
                 url: None,
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("http without url should fail");
         assert!(err.to_string().contains("requires url"), "got: {err}");
@@ -8926,6 +9072,7 @@ require_otp_to_resume = true
                 url: None,
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("sse without url should fail");
         assert!(err.to_string().contains("requires url"), "got: {err}");
@@ -8936,6 +9083,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![http_server("svc", "ftp://example.com/mcp")],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("non-http scheme should fail");
         assert!(err.to_string().contains("http/https"), "got: {err}");
@@ -8946,6 +9094,7 @@ require_otp_to_resume = true
         let cfg = McpConfig {
             enabled: true,
             servers: vec![http_server("svc", "not a url at all !!!")],
+            ..Default::default()
         };
         let err = validate_mcp_config(&cfg).expect_err("invalid url should fail");
         assert!(err.to_string().contains("valid URL"), "got: {err}");
