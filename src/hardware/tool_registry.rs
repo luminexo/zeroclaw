@@ -155,7 +155,7 @@ impl ToolRegistry {
         {
             let reg = devices.read().await;
             let mut aliases = reg.aliases();
-            aliases.sort(); // deterministic log order
+            aliases.sort_unstable(); // deterministic log order
             for alias in aliases {
                 if let Some(device) = reg.get_device(alias) {
                     let port = device.port().unwrap_or("(native)");
@@ -229,7 +229,7 @@ impl ToolRegistry {
     /// List all registered tool names (sorted, for logging / debug).
     pub fn list(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.tools.keys().map(|s| s.as_str()).collect();
-        names.sort();
+        names.sort_unstable();
         names
     }
 
@@ -351,7 +351,7 @@ mod tests {
             .map(|s| s["name"].as_str().unwrap_or(""))
             .collect();
         let mut sorted = names.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(names, sorted, "schemas not sorted by name");
     }
 
@@ -377,7 +377,7 @@ mod tests {
 
         let names = registry.list();
         let mut sorted = names.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(
             names, sorted,
             "list() should return sorted names; got: {:?}",

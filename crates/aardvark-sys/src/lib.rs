@@ -177,8 +177,9 @@ impl AardvarkHandle {
     pub fn open_port(port: i32) -> Result<Self> {
         let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
         let handle: i32 = unsafe {
-            let f: Symbol<unsafe extern "C" fn(i32) -> i32> =
-                lib.get(b"c_aa_open\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let f: Symbol<unsafe extern "C" fn(i32) -> i32> = lib
+                .get(b"c_aa_open\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             f(port)
         };
         if handle <= 0 {
@@ -199,10 +200,8 @@ impl AardvarkHandle {
         };
         let mut ports = [0u16; 16];
         let n: i32 = unsafe {
-            let f: std::result::Result<
-                Symbol<unsafe extern "C" fn(i32, *mut u16) -> i32>,
-                _,
-            > = lib.get(b"c_aa_find_devices\0");
+            let f: std::result::Result<Symbol<unsafe extern "C" fn(i32, *mut u16) -> i32>, _> =
+                lib.get(b"c_aa_find_devices\0");
             match f {
                 Ok(f) => f(16, ports.as_mut_ptr()),
                 Err(e) => {
@@ -211,7 +210,10 @@ impl AardvarkHandle {
                 }
             }
         };
-        eprintln!("[aardvark-sys] find_devices: c_aa_find_devices returned {n}, ports={:?}", &ports[..n.max(0) as usize]);
+        eprintln!(
+            "[aardvark-sys] find_devices: c_aa_find_devices returned {n}, ports={:?}",
+            &ports[..n.max(0) as usize]
+        );
         if n <= 0 {
             return Vec::new();
         }
@@ -230,14 +232,17 @@ impl AardvarkHandle {
     pub fn i2c_enable(&self, bitrate_khz: u32) -> Result<()> {
         let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
         unsafe {
-            let configure: Symbol<unsafe extern "C" fn(i32, i32) -> i32> =
-                lib.get(b"c_aa_configure\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let configure: Symbol<unsafe extern "C" fn(i32, i32) -> i32> = lib
+                .get(b"c_aa_configure\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             configure(self.handle, AA_CONFIG_GPIO_I2C);
-            let pullup: Symbol<unsafe extern "C" fn(i32, u8) -> i32> =
-                lib.get(b"c_aa_i2c_pullup\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let pullup: Symbol<unsafe extern "C" fn(i32, u8) -> i32> = lib
+                .get(b"c_aa_i2c_pullup\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             pullup(self.handle, AA_I2C_PULLUP_BOTH);
-            let bitrate: Symbol<unsafe extern "C" fn(i32, i32) -> i32> =
-                lib.get(b"c_aa_i2c_bitrate\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let bitrate: Symbol<unsafe extern "C" fn(i32, i32) -> i32> = lib
+                .get(b"c_aa_i2c_bitrate\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             bitrate(self.handle, bitrate_khz as i32);
         }
         Ok(())
@@ -247,8 +252,9 @@ impl AardvarkHandle {
     pub fn i2c_write(&self, addr: u8, data: &[u8]) -> Result<()> {
         let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
         let ret: i32 = unsafe {
-            let f: Symbol<unsafe extern "C" fn(i32, u16, i32, u16, *const u8) -> i32> =
-                lib.get(b"c_aa_i2c_write\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let f: Symbol<unsafe extern "C" fn(i32, u16, i32, u16, *const u8) -> i32> = lib
+                .get(b"c_aa_i2c_write\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             f(
                 self.handle,
                 u16::from(addr),
@@ -269,8 +275,9 @@ impl AardvarkHandle {
         let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
         let mut buf = vec![0u8; len];
         let ret: i32 = unsafe {
-            let f: Symbol<unsafe extern "C" fn(i32, u16, i32, u16, *mut u8) -> i32> =
-                lib.get(b"c_aa_i2c_read\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let f: Symbol<unsafe extern "C" fn(i32, u16, i32, u16, *mut u8) -> i32> = lib
+                .get(b"c_aa_i2c_read\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             f(
                 self.handle,
                 u16::from(addr),
@@ -302,8 +309,7 @@ impl AardvarkHandle {
         let Ok(f): std::result::Result<
             Symbol<unsafe extern "C" fn(i32, u16, i32, u16, *mut u8) -> i32>,
             _,
-        > = (unsafe { lib.get(b"c_aa_i2c_read\0") })
-        else {
+        > = (unsafe { lib.get(b"c_aa_i2c_read\0") }) else {
             return Vec::new();
         };
         let mut found = Vec::new();
@@ -326,15 +332,18 @@ impl AardvarkHandle {
     pub fn spi_enable(&self, bitrate_khz: u32) -> Result<()> {
         let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
         unsafe {
-            let configure: Symbol<unsafe extern "C" fn(i32, i32) -> i32> =
-                lib.get(b"c_aa_configure\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let configure: Symbol<unsafe extern "C" fn(i32, i32) -> i32> = lib
+                .get(b"c_aa_configure\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             configure(self.handle, AA_CONFIG_SPI_GPIO);
             // SPI mode 0: polarity=rising/falling(0), phase=sample/setup(0), MSB first(0)
-            let spi_cfg: Symbol<unsafe extern "C" fn(i32, i32, i32, i32) -> i32> =
-                lib.get(b"c_aa_spi_configure\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let spi_cfg: Symbol<unsafe extern "C" fn(i32, i32, i32, i32) -> i32> = lib
+                .get(b"c_aa_spi_configure\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             spi_cfg(self.handle, 0, 0, 0);
-            let bitrate: Symbol<unsafe extern "C" fn(i32, i32) -> i32> =
-                lib.get(b"c_aa_spi_bitrate\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let bitrate: Symbol<unsafe extern "C" fn(i32, i32) -> i32> = lib
+                .get(b"c_aa_spi_bitrate\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             bitrate(self.handle, bitrate_khz as i32);
         }
         Ok(())
@@ -348,8 +357,9 @@ impl AardvarkHandle {
         let mut recv = vec![0u8; send.len()];
         // aa_spi_write(aardvark, out_num_bytes, data_out, in_num_bytes, data_in)
         let ret: i32 = unsafe {
-            let f: Symbol<unsafe extern "C" fn(i32, u16, *const u8, u16, *mut u8) -> i32> =
-                lib.get(b"c_aa_spi_write\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let f: Symbol<unsafe extern "C" fn(i32, u16, *const u8, u16, *mut u8) -> i32> = lib
+                .get(b"c_aa_spi_write\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             f(
                 self.handle,
                 send.len() as u16,
@@ -374,14 +384,16 @@ impl AardvarkHandle {
     pub fn gpio_set(&self, direction: u8, value: u8) -> Result<()> {
         let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
         unsafe {
-            let dir_f: Symbol<unsafe extern "C" fn(i32, u8) -> i32> =
-                lib.get(b"c_aa_gpio_direction\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let dir_f: Symbol<unsafe extern "C" fn(i32, u8) -> i32> = lib
+                .get(b"c_aa_gpio_direction\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             let d = dir_f(self.handle, direction);
             if d < 0 {
                 return Err(AardvarkError::GpioError(d));
             }
             let set_f: Symbol<unsafe extern "C" fn(i32, u8) -> i32> =
-                lib.get(b"c_aa_gpio_set\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+                lib.get(b"c_aa_gpio_set\0")
+                    .map_err(|_| AardvarkError::LibraryNotFound)?;
             let r = set_f(self.handle, value);
             if r < 0 {
                 return Err(AardvarkError::GpioError(r));
@@ -394,8 +406,9 @@ impl AardvarkHandle {
     pub fn gpio_get(&self) -> Result<u8> {
         let lib = lib().ok_or(AardvarkError::LibraryNotFound)?;
         let ret: i32 = unsafe {
-            let f: Symbol<unsafe extern "C" fn(i32) -> i32> =
-                lib.get(b"c_aa_gpio_get\0").map_err(|_| AardvarkError::LibraryNotFound)?;
+            let f: Symbol<unsafe extern "C" fn(i32) -> i32> = lib
+                .get(b"c_aa_gpio_get\0")
+                .map_err(|_| AardvarkError::LibraryNotFound)?;
             f(self.handle)
         };
         if ret < 0 {
@@ -410,9 +423,7 @@ impl Drop for AardvarkHandle {
     fn drop(&mut self) {
         if let Some(lib) = lib() {
             unsafe {
-                if let Ok(f) =
-                    lib.get::<unsafe extern "C" fn(i32) -> i32>(b"c_aa_close\0")
-                {
+                if let Ok(f) = lib.get::<unsafe extern "C" fn(i32) -> i32>(b"c_aa_close\0") {
                     f(self.handle);
                 }
             }
@@ -446,7 +457,10 @@ mod tests {
 
     #[test]
     fn error_display_messages_are_human_readable() {
-        assert!(AardvarkError::NotFound.to_string().to_lowercase().contains("not found"));
+        assert!(AardvarkError::NotFound
+            .to_string()
+            .to_lowercase()
+            .contains("not found"));
         assert!(AardvarkError::OpenFailed(-1).to_string().contains("-1"));
         assert!(AardvarkError::I2cWriteFailed(-3)
             .to_string()

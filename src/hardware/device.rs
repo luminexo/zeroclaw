@@ -111,6 +111,7 @@ impl std::fmt::Display for DeviceKind {
 /// Populated from device handshake or static board metadata.
 /// Tools can check capabilities before attempting unsupported operations.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DeviceCapabilities {
     pub gpio: bool,
     pub i2c: bool,
@@ -757,7 +758,7 @@ mod tests {
         reg.register("pico", None, None, None, None);
         reg.register("arduino-uno", None, None, None, None);
         let mut aliases = reg.aliases();
-        aliases.sort();
+        aliases.sort_unstable();
         assert_eq!(aliases, vec!["arduino0", "pico0"]);
     }
 
