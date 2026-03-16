@@ -9,6 +9,10 @@ use tokio::time::Duration;
 const STATUS_FLUSH_SECONDS: u64 = 5;
 
 /// Wait for shutdown signal (SIGINT or SIGTERM)
+///
+/// SIGHUP is explicitly handled to prevent daemon termination when the terminal
+/// or SSH session closes. When SIGHUP is received, it is logged and ignored,
+/// allowing the daemon to continue running in the background as expected.
 async fn wait_for_shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
@@ -16,13 +20,22 @@ async fn wait_for_shutdown_signal() -> Result<()> {
 
         let mut sigint = signal(SignalKind::interrupt())?;
         let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sighup = signal(SignalKind::hangup())?;
 
-        tokio::select! {
-            _ = sigint.recv() => {
-                tracing::info!("Received SIGINT, shutting down...");
-            }
-            _ = sigterm.recv() => {
-                tracing::info!("Received SIGTERM, shutting down...");
+        loop {
+            tokio::select! {
+                _ = sigint.recv() => {
+                    tracing::info!("Received SIGINT, shutting down...");
+                    break;
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM, shutting down...");
+                    break;
+                }
+                _ = sighup.recv() => {
+                    tracing::info!("Received SIGHUP, ignoring (daemon continues running)");
+                    // Continue running - SIGHUP should not terminate the daemon
+                }
             }
         }
     }
